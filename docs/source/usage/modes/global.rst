@@ -12,7 +12,7 @@ The following commands are available globally
     close a buffer
 
     optional arguments
-        :---redraw: redraw current buffer                      after command has finished.
+        :---redraw: redraw current buffer after command has finished.
         :---force: never ask for confirmation.
 
 .. _cmd.global.bprevious:
@@ -26,7 +26,8 @@ The following commands are available globally
 
 .. describe:: search
 
-    open a new search buffer
+    open a new search buffer. Search obeys the notmuch
+    :ref:`search.exclude_tags <search.exclude_tags>` setting.
 
     argument
         search string
@@ -55,10 +56,8 @@ The following commands are available globally
 
 .. describe:: help
 
-    
-    display help for a command. Use 'bindings' to
-    display all keybings interpreted in current mode.'
-    
+    display help for a command. Use 'bindings' to display all keybings
+    interpreted in current mode.'
 
     argument
         command or 'bindings'
@@ -81,7 +80,7 @@ The following commands are available globally
     move focus in current buffer
 
     argument
-        up, down, [half]page up, [half]page down, first
+        up, down, [half]page up, [half]page down, first, last
 
 
 .. _cmd.global.shellescape:
@@ -96,13 +95,20 @@ The following commands are available globally
     optional arguments
         :---spawn: run in terminal window.
         :---thread: run in separate thread.
-        :---refocus: refocus current buffer                      after command has finished.
+        :---refocus: refocus current buffer after command has finished.
 
 .. _cmd.global.refresh:
 
 .. describe:: refresh
 
     refresh the current buffer
+
+
+.. _cmd.global.reload:
+
+.. describe:: reload
+
+    Reload all configuration files
 
 
 .. _cmd.global.pyshell:
@@ -118,9 +124,13 @@ The following commands are available globally
 
     compose a new email
 
+    argument
+        None
+
     optional arguments
         :---sender: sender.
         :---template: path to a template message file.
+        :---tags: comma-separated list of tags to apply to message.
         :---subject: subject line.
         :---to: recipients.
         :---cc: copy to.
@@ -133,7 +143,12 @@ The following commands are available globally
 
 .. describe:: exit
 
-    shut down cleanly
+    Shut down cleanly.
+
+    The _prompt variable is for internal use only, it's used to control
+    prompting to close without sending, and is used by the BufferCloseCommand
+    if settings change after yielding to the UI.
+    
 
 
 .. _cmd.global.flush:
@@ -154,7 +169,7 @@ The following commands are available globally
 
 .. describe:: call
 
-     Executes python code 
+    Executes python code
 
     argument
         python command string to call
@@ -173,4 +188,6 @@ The following commands are available globally
 
     opens taglist buffer
 
+    optional arguments
+        :---tags: tags to display.
 

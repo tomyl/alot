@@ -1,11 +1,12 @@
 # Copyright (C) 2011-2012  Patrick Totzke <patricktotzke@gmail.com>
 # This file is released under the GNU GPL, version 3 or a later revision.
 # For further details see the COPYING file
-import operator
+from __future__ import absolute_import
+
 from datetime import datetime
 
-from message import Message
-from alot.settings import settings
+from .message import Message
+from ..settings.const import settings
 
 
 class Thread(object):
@@ -24,7 +25,11 @@ class Thread(object):
         :type thread: :class:`notmuch.database.Thread`
         """
         self._dbman = dbman
+        self._authors = None
         self._id = thread.get_thread_id()
+        self._messages = {}
+        self._tags = set()
+
         self.refresh(thread)
 
     def refresh(self, thread=None):
@@ -59,7 +64,7 @@ class Thread(object):
         except ValueError:  # year is out of range
             self._newest_date = None
 
-        self._tags = set([t for t in thread.get_tags()])
+        self._tags = {t for t in thread.get_tags()}
         self._messages = {}  # this maps messages to its children
         self._toplevel_messages = []
 
@@ -81,7 +86,7 @@ class Thread(object):
         """
         tags = set(list(self._tags))
         if intersection:
-            for m in self.get_messages().keys():
+            for m in self.get_messages().iterkeys():
                 tags = tags.intersection(set(m.get_tags()))
         return tags
 
@@ -150,25 +155,25 @@ class Thread(object):
         :rtype: list of (str, str)
         """
         if self._authors is None:
-            seen = {}
-            msgs = self.get_messages().keys()
-            msgs_with_date = filter(lambda m: m.get_date() is not None, msgs)
-            msgs_without_date = filter(lambda m: m.get_date() is None, msgs)
-            # sort messages with date and append the others
-            msgs_with_date.sort(None, lambda m: m.get_date())
-            msgs = msgs_with_date + msgs_without_date
+            # Sort messages with date first (by date ascending), and those
+            # without a date last.
+            msgs = sorted(self.get_messages().iterkeys(),
+                          key=lambda m: m.get_date() or datetime.max)
+
             orderby = settings.get('thread_authors_order_by')
+            self._authors = []
             if orderby == 'latest_message':
-                for i, m in enumerate(msgs):
+                for m in msgs:
                     pair = m.get_author()
-                    seen[pair] = i
-            else: # i.e. first_message
-                for i, m in enumerate(msgs):
+                    if pair in self._authors:
+                        self._authors.remove(pair)
+                    self._authors.append(pair)
+            else:  # i.e. first_message
+                for m in msgs:
                     pair = m.get_author()
-                    if pair not in seen:
-                        seen[pair] = i
-            self._authors = [ name for name, addr in
-                sorted(seen.items(), key=operator.itemgetter(1)) ]
+                    if pair not in self._authors:
+                        self._authors.append(pair)
+
         return self._authors
 
     def get_authors_string(self, own_addrs=None, replace_own=None):
@@ -226,7 +231,7 @@ class Thread(object):
         """
         if not self._messages:  # if not already cached
             query = self._dbman.query('thread:' + self._id)
-            thread = query.search_threads().next()
+            thread = next(query.search_threads())
 
             def accumulate(acc, msg):
                 M = Message(self._dbman, msg, thread=self)
@@ -252,7 +257,7 @@ class Thread(object):
         """
         mid = msg.get_message_id()
         msg_hash = self.get_messages()
-        for m in msg_hash.keys():
+        for m in msg_hash.iterkeys():
             if m.get_message_id() == mid:
                 return msg_hash[m]
         return None

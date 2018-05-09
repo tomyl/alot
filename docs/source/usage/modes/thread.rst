@@ -22,6 +22,7 @@ The following commands are available in thread mode
         :---add_tags: add 'Tags' header to the message.
         :---shell: let the shell interpret the command.
         :---notify_stdout: display cmd's stdout as notification.
+        :---field_key: mailcap field key for decoding (Defaults to: 'copiousoutput').
 
 .. _cmd.thread.editnew:
 
@@ -39,21 +40,18 @@ The following commands are available in thread mode
     move focus in current buffer
 
     argument
-        up, down, page up, page down, first, last
+        up, down, [half]page up, [half]page down, first, last,                   parent, first reply, last reply,                   next sibling, previous sibling, next, previous,                   next unfolded, previous unfolded,                   next NOTMUCH_QUERY, previous NOTMUCH_QUERY
 
 
-.. _cmd.thread.untag:
+.. _cmd.thread.indent:
 
-.. describe:: untag
+.. describe:: indent
 
-    remove tags from message(s)
+    change message/reply indentation
 
     argument
-        comma separated list of tags
+        None
 
-    optional arguments
-        :---all: tag all messages in thread.
-        :---no-flush: postpone a writeout to the index (Defaults to: 'True').
 
 .. _cmd.thread.toggleheaders:
 
@@ -64,6 +62,19 @@ The following commands are available in thread mode
     argument
         query used to filter messages to affect
 
+
+.. _cmd.thread.retag:
+
+.. describe:: retag
+
+    set message(s) tags.
+
+    argument
+        comma separated list of tags
+
+    optional arguments
+        :---all: tag all messages in thread.
+        :---no-flush: postpone a writeout to the index (Defaults to: 'True').
 
 .. _cmd.thread.print:
 
@@ -94,11 +105,11 @@ The following commands are available in thread mode
         query used to filter messages to affect
 
 
-.. _cmd.thread.retag:
+.. _cmd.thread.untag:
 
-.. describe:: retag
+.. describe:: untag
 
-    set message(s) tags.
+    remove tags from message(s)
 
     argument
         comma separated list of tags

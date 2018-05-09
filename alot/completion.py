@@ -1,24 +1,33 @@
 # Copyright (C) 2011-2012  Patrick Totzke <patricktotzke@gmail.com>
 # This file is released under the GNU GPL, version 3 or a later revision.
 # For further details see the COPYING file
-import re
-import os
+from __future__ import absolute_import
+
+import abc
+import argparse
+import email.utils
 import glob
 import logging
-import argparse
+import os
+import re
 
-import alot.crypto as crypto
-import alot.commands as commands
-from alot.buffers import EnvelopeBuffer
-from alot.settings import settings
-from alot.utils.booleanaction import BooleanAction
-from alot.helper import split_commandline
-from alot.addressbook import AddressbookError
-from errors import CompletionError
+from . import crypto
+from . import commands
+from .buffers import EnvelopeBuffer
+from .settings.const import settings
+from .utils import argparse as cargparse
+from .helper import split_commandline
+from .addressbook import AddressbookError
+from .errors import CompletionError
+from .utils.cached_property import cached_property
 
 
 class Completer(object):
     """base class for completers"""
+
+    __metaclass__ = abc.ABCMeta
+
+    @abc.abstractmethod
     def complete(self, original, pos):
         """returns a list of completions and cursor positions for the
         string original from position pos on.
@@ -32,7 +41,7 @@ class Completer(object):
         :rtype: list of (str, int)
         :raises: :exc:`CompletionError`
         """
-        return list()
+        pass
 
     def relevant_part(self, original, pos, sep=' '):
         """
@@ -66,7 +75,7 @@ class StringlistCompleter(Completer):
         re_prefix = '.*' if self.match_anywhere else ''
 
         def match(s, m):
-            r = re_prefix + m + '.*'
+            r = '{}{}.*'.format(re_prefix, re.escape(m))
             return re.match(r, s, flags=self.flags) is not None
 
         return [(a, len(a)) for a in self.resultlist if match(a, pref)]
@@ -108,7 +117,7 @@ class MultipleSelectionCompleter(Completer):
     def complete(self, original, pos):
         mypart, start, end, mypos = self.relevant_part(original, pos)
         res = []
-        for c, p in self._completer.complete(mypart, mypos):
+        for c, _ in self._completer.complete(mypart, mypos):
             newprefix = original[:start] + c
             if not original[end:].startswith(self._separator):
                 newprefix += self._separator
@@ -120,7 +129,7 @@ class QueryCompleter(Completer):
     """completion for a notmuch query string"""
     def __init__(self, dbman):
         """
-        :param dbman: used to look up avaliable tagstrings
+        :param dbman: used to look up available tagstrings
         :type dbman: :class:`~alot.db.DBManager`
         """
         self.dbman = dbman
@@ -133,9 +142,9 @@ class QueryCompleter(Completer):
     def complete(self, original, pos):
         mypart, start, end, mypos = self.relevant_part(original, pos)
         myprefix = mypart[:mypos]
-        m = re.search('(tag|is|to|from):(\w*)', myprefix)
+        m = re.search(r'(tag|is|to|from):(\w*)', myprefix)
         if m:
-            cmd, params = m.groups()
+            cmd, _ = m.groups()
             cmdlen = len(cmd) + 1  # length of the keyword part incld colon
             if cmd in ['to', 'from']:
                 localres = self._abookscompleter.complete(mypart[cmdlen:],
@@ -150,7 +159,7 @@ class QueryCompleter(Completer):
                 resultlist.append((newtext, newpos))
             return resultlist
         else:
-            matched = filter(lambda t: t.startswith(myprefix), self.keywords)
+            matched = (t for t in self.keywords if t.startswith(myprefix))
             resultlist = []
             for keyword in matched:
                 newprefix = original[:start] + keyword + ':'
@@ -163,7 +172,7 @@ class TagCompleter(StringlistCompleter):
 
     def __init__(self, dbman):
         """
-        :param dbman: used to look up avaliable tagstrings
+        :param dbman: used to look up available tagstrings
         :type dbman: :class:`~alot.db.DBManager`
         """
         resultlist = dbman.get_all_tags()
@@ -175,7 +184,7 @@ class TagsCompleter(MultipleSelectionCompleter):
 
     def __init__(self, dbman):
         """
-        :param dbman: used to look up avaliable tagstrings
+        :param dbman: used to look up available tagstrings
         :type dbman: :class:`~alot.db.DBManager`
         """
         self._completer = TagCompleter(dbman)
@@ -220,14 +229,11 @@ class AbooksCompleter(Completer):
             except AddressbookError as e:
                 raise CompletionError(e)
         if self.addressesonly:
-            returnlist = [(email, len(email)) for (name, email) in res]
+            returnlist = [(addr, len(addr)) for (name, addr) in res]
         else:
             returnlist = []
-            for name, email in res:
-                if name:
-                    newtext = "%s <%s>" % (name, email)
-                else:
-                    newtext = email
+            for name, addr in res:
+                newtext = email.utils.formataddr((name, addr))
                 returnlist.append((newtext, len(newtext)))
         return returnlist
 
@@ -258,8 +264,8 @@ class ArgparseOptionCompleter(Completer):
                 for optionstring in act.option_strings:
                     if optionstring.startswith(pref):
                         # append '=' for options that await a string value
-                        if isinstance(act, argparse._StoreAction) or\
-                                isinstance(act, BooleanAction):
+                        if isinstance(act, (argparse._StoreAction,
+                                            cargparse.BooleanAction)):
                             optionstring += '='
                         res.append(optionstring)
 
@@ -271,7 +277,8 @@ class AccountCompleter(StringlistCompleter):
 
     def __init__(self, **kwargs):
         accounts = settings.get_accounts()
-        resultlist = ["%s <%s>" % (a.realname, a.address) for a in accounts]
+        resultlist = [email.utils.formataddr((a.realname, a.address))
+                      for a in accounts]
         StringlistCompleter.__init__(self, resultlist, match_anywhere=True,
                                      **kwargs)
 
@@ -289,7 +296,7 @@ class CommandNameCompleter(Completer):
     def complete(self, original, pos):
         # TODO refine <tab> should get current querystring
         commandprefix = original[:pos]
-        logging.debug('original="%s" prefix="%s"' % (original, commandprefix))
+        logging.debug('original="%s" prefix="%s"', original, commandprefix)
         cmdlist = commands.COMMANDS['global'].copy()
         cmdlist.update(commands.COMMANDS[self.mode])
         matching = [t for t in cmdlist if t.startswith(commandprefix)]
@@ -301,7 +308,7 @@ class CommandCompleter(Completer):
 
     def __init__(self, dbman, mode, currentbuffer=None):
         """
-        :param dbman: used to look up avaliable tagstrings
+        :param dbman: used to look up available tagstrings
         :type dbman: :class:`~alot.db.DBManager`
         :param mode: mode identifier
         :type mode: str
@@ -314,14 +321,35 @@ class CommandCompleter(Completer):
         self.mode = mode
         self.currentbuffer = currentbuffer
         self._commandnamecompleter = CommandNameCompleter(mode)
-        self._querycompleter = QueryCompleter(dbman)
-        self._tagcompleter = TagCompleter(dbman)
+
+    @cached_property
+    def _querycompleter(self):
+        return QueryCompleter(self.dbman)
+
+    @cached_property
+    def _tagcompleter(self):
+        return TagCompleter(self.dbman)
+
+    @cached_property
+    def _contactscompleter(self):
         abooks = settings.get_addressbooks()
-        self._contactscompleter = ContactsCompleter(abooks)
-        self._pathcompleter = PathCompleter()
-        self._accountscompleter = AccountCompleter()
-        self._secretkeyscompleter = CryptoKeyCompleter(private=True)
-        self._publickeyscompleter = CryptoKeyCompleter(private=False)
+        return ContactsCompleter(abooks)
+
+    @cached_property
+    def _pathcompleter(self):
+        return PathCompleter()
+
+    @cached_property
+    def _accountscompleter(self):
+        return AccountCompleter()
+
+    @cached_property
+    def _secretkeyscompleter(self):
+        return CryptoKeyCompleter(private=True)
+
+    @cached_property
+    def _publickeyscompleter(self):
+        return CryptoKeyCompleter(private=False)
 
     def complete(self, line, pos):
         # remember how many preceding space characters we see until the command
@@ -409,10 +437,10 @@ class CommandCompleter(Completer):
                                                                    localpos)
 
                         # prepend 'set ' + header and correct position
-                        def f((completed, pos)):
+                        def f(completed, pos):
                             return ('%s %s' % (header, completed),
                                     pos + len(header) + 1)
-                        res = map(f, res)
+                        res = [f(c, p) for c, p in res]
                         logging.debug(res)
 
                 elif self.mode == 'envelope' and cmd == 'unset':
@@ -436,6 +464,11 @@ class CommandCompleter(Completer):
                                                          'rmencrypt',
                                                          'toggleencrypt']:
                     res = self._publickeyscompleter.complete(params, localpos)
+                elif self.mode == 'envelope' and cmd in ['tag', 'toggletags',
+                                                         'untag', 'retag']:
+                    localcomp = MultipleSelectionCompleter(self._tagcompleter,
+                                                           separator=',')
+                    res = localcomp.complete(params, localpos)
                 # thread
                 elif self.mode == 'thread' and cmd == 'save':
                     res = self._pathcompleter.complete(params, localpos)
@@ -449,12 +482,14 @@ class CommandCompleter(Completer):
                                                            separator=',')
                     res = localcomp.complete(params, localpos)
                 elif cmd == 'move':
-                    directions = ['up', 'down', 'page up', 'page down']
+                    directions = ['up', 'down', 'page up', 'page down',
+                                  'halfpage up', 'halfpage down', 'first',
+                                  'last']
                     if self.mode == 'thread':
-                        directions += ['first', 'last', 'next', 'previous',
-                                       'last reply', 'first reply', 'parent',
-                                       'next unfolded', 'previous unfolded',
-                                       'next sibling', 'previous sibling']
+                        directions += ['parent', 'first reply', 'last reply',
+                                       'next sibling', 'previous sibling',
+                                       'next', 'previous', 'next unfolded',
+                                       'previous unfolded']
                     localcompleter = StringlistCompleter(directions)
                     res = localcompleter.complete(params, localpos)
 
@@ -473,7 +508,7 @@ class CommandLineCompleter(Completer):
 
     def __init__(self, dbman, mode, currentbuffer=None):
         """
-        :param dbman: used to look up avaliable tagstrings
+        :param dbman: used to look up available tagstrings
         :type dbman: :class:`~alot.db.DBManager`
         :param mode: mode identifier
         :type mode: str
@@ -484,7 +519,8 @@ class CommandLineCompleter(Completer):
         """
         self._commandcompleter = CommandCompleter(dbman, mode, currentbuffer)
 
-    def get_context(self, line, pos):
+    @staticmethod
+    def get_context(line, pos):
         """
         computes start and end position of substring of line that is the
         command string under given position
@@ -515,23 +551,41 @@ class CommandLineCompleter(Completer):
 
 
 class PathCompleter(Completer):
+
     """completion for paths"""
+
     def complete(self, original, pos):
         if not original:
             return [('~/', 2)]
         prefix = os.path.expanduser(original[:pos])
 
         def escape(path):
-            return path.replace('\\', '\\\\').replace(' ', '\ ')
+            """Escape all backslashes and spaces in given path with a
+            backslash.
+
+            :param path: the path to escape
+            :type path: str
+            :returns: the escaped path
+            :rtype: str
+            """
+            return path.replace('\\', '\\\\').replace(' ', r'\ ')
 
         def deescape(escaped_path):
+            """Remove escaping backslashes in front of spaces and backslashes.
+
+            :param escaped_path: a path potentially with escaped spaces and
+                backslashs
+            :type escaped_path: str
+            :returns: the actual path
+            :rtype: str
+            """
             return escaped_path.replace('\\ ', ' ').replace('\\\\', '\\')
 
         def prep(path):
             escaped_path = escape(path)
             return escaped_path, len(escaped_path)
 
-        return map(prep, glob.glob(deescape(prefix) + '*'))
+        return [prep(g) for g in glob.glob(deescape(prefix) + '*')]
 
 
 class CryptoKeyCompleter(StringlistCompleter):

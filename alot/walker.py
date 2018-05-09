@@ -1,13 +1,19 @@
 # Copyright (C) 2011-2012  Patrick Totzke <patricktotzke@gmail.com>
 # This file is released under the GNU GPL, version 3 or a later revision.
 # For further details see the COPYING file
-import urwid
+from __future__ import absolute_import
+
 import logging
+import urwid
 
 
 class PipeWalker(urwid.ListWalker):
-    """urwid.ListWalker that reads next items from a pipe and
-    wraps them in `containerclass` widgets for displaying
+    """urwid.ListWalker that reads next items from a pipe and wraps them in
+    `containerclass` widgets for displaying
+
+    Attributes that should be considered publicly readable:
+        :attr lines: the lines obtained from the pipe
+        :type lines: list(`containerclass`)
     """
     def __init__(self, pipe, containerclass, reverse=False, **kwargs):
         self.pipe = pipe

@@ -1,27 +1,28 @@
 # Copyright (C) 2011-2012  Patrick Totzke <patricktotzke@gmail.com>
 # This file is released under the GNU GPL, version 3 or a later revision.
 # For further details see the COPYING file
-import os
-import email
-import re
+from __future__ import absolute_import
+
 import glob
+import logging
+import os
+import re
+import email
 from email.encoders import encode_7or8bit
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
-
-from alot import __version__
-import logging
-import alot.helper as helper
-import alot.crypto as crypto
-import gpgme
-from alot.settings import settings
-from alot.errors import GPGProblem, GPGCode
+import email.charset as charset
+import gpg
 
 from .attachment import Attachment
 from .utils import encode_header
+from .. import __version__
+from .. import helper
+from .. import crypto
+from ..settings.const import settings
+from ..errors import GPGProblem, GPGCode
 
-import email.charset as charset
 charset.add_charset('utf-8', charset.QP, charset.QP, 'utf-8')
 
 
@@ -48,8 +49,9 @@ class Envelope(object):
     """tags to add after successful sendout"""
 
     def __init__(
-        self, template=None, bodytext=None, headers=None, attachments=[],
-            sign=False, sign_key=None, encrypt=False, tags=[]):
+            self, template=None, bodytext=None, headers=None, attachments=None,
+            sign=False, sign_key=None, encrypt=False, tags=None, replied=None,
+            passed=None):
         """
         :param template: if not None, the envelope will be initialised by
                          :meth:`parsing <parse_template>` this string before
@@ -63,20 +65,28 @@ class Envelope(object):
         :type attachments: list of :class:`~alot.db.attachment.Attachment`
         :param tags: tags to add after successful sendout and saving this msg
         :type tags: list of str
+        :param replied: message being replied to
+        :type replied: :class:`~alot.db.message.Message`
+        :param passed: message being passed on
+        :type replied: :class:`~alot.db.message.Message`
         """
-        logging.debug('TEMPLATE: %s' % template)
+        logging.debug('TEMPLATE: %s', template)
         if template:
             self.parse_template(template)
-            logging.debug('PARSED TEMPLATE: %s' % template)
-            logging.debug('BODY: %s' % self.body)
+            logging.debug('PARSED TEMPLATE: %s', template)
+            logging.debug('BODY: %s', self.body)
         self.body = bodytext or u''
+        # TODO: if this was as collections.defaultdict a number of methods
+        # could be simplified.
         self.headers = headers or {}
-        self.attachments = list(attachments)
+        self.attachments = list(attachments) if attachments is not None else []
         self.sign = sign
         self.sign_key = sign_key
         self.encrypt = encrypt
         self.encrypt_keys = {}
-        self.tags = tags  # tags to add after successful sendout
+        self.tags = tags or []  # tags to add after successful sendout
+        self.replied = replied  # message being replied to
+        self.passed = passed  # message being passed on
         self.sent_time = None
         self.modified_since_sent = False
         self.sending = False  # semaphore to avoid accidental double sendout
@@ -85,9 +95,8 @@ class Envelope(object):
         return "Envelope (%s)\n%s" % (self.headers, self.body)
 
     def __setitem__(self, name, val):
-        """setter for header values. this allows adding header like so:
-
-        >>> envelope['Subject'] = u'sm\xf8rebr\xf8d'
+        """setter for header values. This allows adding header like so:
+        envelope['Subject'] = u'sm\xf8rebr\xf8d'
         """
         if name not in self.headers:
             self.headers[name] = []
@@ -103,13 +112,13 @@ class Envelope(object):
         return self.headers[name][0]
 
     def __delitem__(self, name):
-        del(self.headers[name])
+        del self.headers[name]
 
         if self.sent_time:
             self.modified_since_sent = True
 
     def __contains__(self, name):
-        return self.headers.__contains__(name)
+        return name in self.headers
 
     def get(self, key, fallback=None):
         """secure getter for header values that allows specifying a `fallback`
@@ -121,12 +130,12 @@ class Envelope(object):
             value = fallback
         return value
 
-    def get_all(self, key, fallback=[]):
+    def get_all(self, key, fallback=None):
         """returns all header values for given key"""
         if key in self.headers:
             value = self.headers[key]
         else:
-            value = fallback
+            value = fallback or []
         return value
 
     def add(self, key, value):
@@ -171,7 +180,6 @@ class Envelope(object):
         # Build body text part. To properly sign/encrypt messages later on, we
         # convert the text to its canonical format (as per RFC 2015).
         canonical_format = self.body.encode('utf-8')
-        canonical_format = canonical_format.replace('\\t', ' ' * 4)
         textpart = MIMEText(canonical_format, 'plain', 'utf-8')
 
         # wrap it in a multipart container if necessary
@@ -186,17 +194,17 @@ class Envelope(object):
 
         if self.sign:
             plaintext = helper.email_as_string(inner_msg)
-            logging.debug('signing plaintext: ' + plaintext)
+            logging.debug('signing plaintext: %s', plaintext)
 
             try:
                 signatures, signature_str = crypto.detached_signature_for(
-                    plaintext, self.sign_key)
+                    plaintext, [self.sign_key])
                 if len(signatures) != 1:
                     raise GPGProblem("Could not sign message (GPGME "
                                      "did not return a signature)",
                                      code=GPGCode.KEY_CANNOT_SIGN)
-            except gpgme.GpgmeError as e:
-                if e.code == gpgme.ERR_BAD_PASSPHRASE:
+            except gpg.errors.GPGMEError as e:
+                if e.getcode() == gpg.errors.BAD_PASSPHRASE:
                     # If GPG_AGENT_INFO is unset or empty, the user just does
                     # not have gpg-agent running (properly).
                     if os.environ.get('GPG_AGENT_INFO', '').strip() == '':
@@ -210,8 +218,8 @@ class Envelope(object):
                 raise GPGProblem(str(e), code=GPGCode.KEY_CANNOT_SIGN)
 
             micalg = crypto.RFC3156_micalg_from_algo(signatures[0].hash_algo)
-            unencrypted_msg = MIMEMultipart('signed', micalg=micalg,
-                                            protocol='application/pgp-signature')
+            unencrypted_msg = MIMEMultipart(
+                'signed', micalg=micalg, protocol='application/pgp-signature')
 
             # wrap signature in MIMEcontainter
             stype = 'pgp-signature; name="signature.asc"'
@@ -230,12 +238,12 @@ class Envelope(object):
 
         if self.encrypt:
             plaintext = helper.email_as_string(unencrypted_msg)
-            logging.debug('encrypting plaintext: ' + plaintext)
+            logging.debug('encrypting plaintext: %s', plaintext)
 
             try:
                 encrypted_str = crypto.encrypt(plaintext,
                                                self.encrypt_keys.values())
-            except gpgme.GpgmeError as e:
+            except gpg.errors.GPGMEError as e:
                 raise GPGProblem(str(e), code=GPGCode.KEY_CANNOT_ENCRYPT)
 
             outer_msg = MIMEMultipart('encrypted',
@@ -260,7 +268,7 @@ class Envelope(object):
         headers = self.headers.copy()
         # add Message-ID
         if 'Message-ID' not in headers:
-            headers['Message-ID'] = [email.Utils.make_msgid()]
+            headers['Message-ID'] = [email.utils.make_msgid()]
 
         if 'User-Agent' in headers:
             uastring_format = headers['User-Agent'][0]
@@ -271,7 +279,7 @@ class Envelope(object):
             headers['User-Agent'] = [uastring]
 
         # copy headers from envelope to mail
-        for k, vlist in headers.items():
+        for k, vlist in headers.iteritems():
             for v in vlist:
                 outer_msg[k] = encode_header(k, v)
 
@@ -285,7 +293,7 @@ class Envelope(object):
         :param reset: remove previous envelope content
         :type reset: bool
         """
-        logging.debug('GoT: """\n%s\n"""' % tmp)
+        logging.debug('GoT: """\n%s\n"""', tmp)
 
         if self.sent_time:
             self.modified_since_sent = True
@@ -293,7 +301,7 @@ class Envelope(object):
         if only_body:
             self.body = tmp
         else:
-            m = re.match('(?P<h>([a-zA-Z0-9_-]+:.+\n)*)\n?(?P<b>(\s*.*)*)',
+            m = re.match(r'(?P<h>([a-zA-Z0-9_-]+:.+\n)*)\n?(?P<b>(\s*.*)*)',
                          tmp)
             assert m
 
@@ -327,8 +335,9 @@ class Envelope(object):
                 to_attach = []
                 for line in self.get_all('Attach'):
                     gpath = os.path.expanduser(line.strip())
-                    to_attach += filter(os.path.isfile, glob.glob(gpath))
-                logging.debug('Attaching: %s' % to_attach)
+                    to_attach += [g for g in glob.glob(gpath)
+                                  if os.path.isfile(g)]
+                logging.debug('Attaching: %s', to_attach)
                 for path in to_attach:
                     self.attach(path)
-                del(self['Attach'])
+                del self['Attach']

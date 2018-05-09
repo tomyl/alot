@@ -11,7 +11,11 @@ To make it easier to switch between or share different such themes, they are def
 files (see below for the exact format).
 To specify the theme to use, set the :ref:`theme <theme>` config option to the name of a theme-file.
 A file by that name will be looked up in the path given by the :ref:`themes_dir <themes-dir>` config setting
-which defaults to :file:`~/.config/alot/themes/`.
+which defaults to $XDG_CONFIG_HOME/alot/themes, and :file:`~/.config/alot/themes/`,
+if XDG_CONFIG_HOME is empty or not set. If the themes_dir is not
+present then the contents of $XDG_DATA_DIRS/alot/themes will be tried in order.
+This defaults to :file:`/usr/local/share/alot/themes` and :file:`/usr/share/alot/themes`, in that order.
+These locations are meant to be used by distro packages to put themes in.
 
 .. _config.theming.themefiles:
 
@@ -55,18 +59,19 @@ underlined bold red text on a bright green background:
     #        v                 v   v                             v              v                             v
     footer = 'bold,underline', '', 'light red, bold, underline', 'light green', 'light red, bold, underline', '#8f6'
 
-Highlighting Thread lines in Search Mode
-----------------------------------------
+Search mode thread ines
+-------------------------
 The subsection '[[threadline]]' of the '[search]' section in :ref:`Theme Files <config.theming.themefiles>`
 determines how to present a thread: here, :ref:`attributes <config.theming.attributes>` 'normal' and
 'focus' provide fallback/spacer themes and 'parts' is a (string) list of displayed subwidgets.
 Possible part strings are:
 
+* authors
+* content
 * date
 * mailcount
-* tags
-* authors
 * subject
+* tags
 
 For every listed part there must be a subsection with the same name, defining
 
@@ -79,7 +84,9 @@ For every listed part there must be a subsection with the same name, defining
 :alignment: how to place the content string if the widget space is larger.
             This must be one of 'right', 'left' or 'center'.
 
-To "highlight" some thread lines (use different attributes than the defaults found in the
+Dynamic theming of thread lines based on query matching
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+To highlight some thread lines (use different attributes than the defaults found in the
 '[[threadline]]' section), one can define sections with prefix 'threadline'.
 Each one of those can redefine any part of the structure outlined above, the rest defaults to
 values defined in '[[threadline]]'.
@@ -129,8 +136,8 @@ and just bold if the thread has unread but no flagged messages:
 
 .. _config.theming.tags:
 
-Custom Tagstring Formatting
----------------------------
+Tagstring Formatting
+--------------------
 
 One can specify how a particular tagstring is displayed throughout the interface. To use this
 feature, add a section `[tags]` to you alot config (not the theme file)

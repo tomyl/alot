@@ -35,6 +35,8 @@ The following commands are available in envelope mode
     argument
         keyid of the key to encrypt with
 
+    optional arguments
+        :---trusted: only add trusted keys.
 
 .. _cmd.envelope.togglesign:
 
@@ -63,6 +65,26 @@ The following commands are available in envelope mode
         :---spawn: spawn editor in new terminal.
         :---refocus: refocus envelope after editing (Defaults to: 'True').
 
+.. _cmd.envelope.retag:
+
+.. describe:: retag
+
+    set message tags.
+
+    argument
+        comma separated list of tags
+
+
+.. _cmd.envelope.tag:
+
+.. describe:: tag
+
+    add tags to message
+
+    argument
+        comma separated list of tags
+
+
 .. _cmd.envelope.send:
 
 .. describe:: send
@@ -78,6 +100,16 @@ The following commands are available in envelope mode
 
     argument
         which key id to use
+
+
+.. _cmd.envelope.untag:
+
+.. describe:: untag
+
+    remove tags from message
+
+    argument
+        comma separated list of tags
 
 
 .. _cmd.envelope.attach:
@@ -129,6 +161,8 @@ The following commands are available in envelope mode
     argument
         keyid of the key to encrypt with
 
+    optional arguments
+        :---trusted: only add trusted keys.
 
 .. _cmd.envelope.save:
 
@@ -142,6 +176,16 @@ The following commands are available in envelope mode
 .. describe:: unsign
 
     mark mail not to be signed before sending
+
+
+.. _cmd.envelope.toggletags:
+
+.. describe:: toggletags
+
+    flip presence of tags on message
+
+    argument
+        comma separated list of tags
 
 
 .. _cmd.envelope.unset:

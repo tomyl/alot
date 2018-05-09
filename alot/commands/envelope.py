@@ -1,41 +1,47 @@
 # Copyright (C) 2011-2012  Patrick Totzke <patricktotzke@gmail.com>
 # This file is released under the GNU GPL, version 3 or a later revision.
 # For further details see the COPYING file
+from __future__ import absolute_import
+
 import argparse
-import os
-import re
+import datetime
+import email
 import glob
 import logging
-import email
+import os
+import re
 import tempfile
-from twisted.internet.defer import inlineCallbacks
-import datetime
+import textwrap
 
-from alot.account import SendingMailFailed, StoreMailError
-from alot.errors import GPGProblem
-from alot import buffers
-from alot import commands
-from alot import crypto
-from alot.commands import Command, registerCommand
-from alot.commands import globals
-from alot.commands.utils import get_keys
-from alot.helper import string_decode
-from alot.helper import email_as_string
-from alot.settings import settings
-from alot.utils.booleanaction import BooleanAction
-from alot.db.errors import DatabaseError
+from twisted.internet.defer import inlineCallbacks
+
+from . import Command, registerCommand
+from . import globals
+from . import utils
+from .. import buffers
+from .. import commands
+from .. import crypto
+from ..account import SendingMailFailed, StoreMailError
+from ..db.errors import DatabaseError
+from ..errors import GPGProblem
+from ..helper import email_as_string
+from ..helper import string_decode
+from ..settings.const import settings
+from ..settings.errors import NoMatchingAccount
+from ..utils import argparse as cargparse
 
 
 MODE = 'envelope'
 
 
-@registerCommand(MODE, 'attach', arguments=[
-    (['path'], {'help': 'file(s) to attach (accepts wildcads)'})])
+@registerCommand(
+    MODE, 'attach',
+    arguments=[(['path'], {'help': 'file(s) to attach (accepts wildcads)'})])
 class AttachCommand(Command):
     """attach files to the mail"""
     repeatable = True
 
-    def __init__(self, path=None, **kwargs):
+    def __init__(self, path, **kwargs):
         """
         :param path: files to attach (globable string)
         :type path: str
@@ -46,17 +52,13 @@ class AttachCommand(Command):
     def apply(self, ui):
         envelope = ui.current_buffer.envelope
 
-        if self.path:  # TODO: not possible, otherwise argparse error before
-            files = filter(os.path.isfile,
-                           glob.glob(os.path.expanduser(self.path)))
-            if not files:
-                ui.notify('no matches, abort')
-                return
-        else:
-            ui.notify('no files specified, abort')
+        files = [g for g in glob.glob(os.path.expanduser(self.path))
+                 if os.path.isfile(g)]
+        if not files:
+            ui.notify('no matches, abort')
             return
 
-        logging.info("attaching: %s" % files)
+        logging.info("attaching: %s", files)
         for path in files:
             envelope.attach(path)
         ui.current_buffer.rebuild()
@@ -114,24 +116,22 @@ class SaveCommand(Command):
         envelope = ui.current_buffer.envelope
 
         # determine account to use
-        sname, saddr = email.Utils.parseaddr(envelope.get('From'))
-        account = settings.get_account_by_address(saddr)
-        if account is None:
-            if not settings.get_accounts():
-                ui.notify('no accounts set.', priority='error')
-                return
-            else:
-                account = settings.get_accounts()[0]
+        try:
+            account = settings.get_account_by_address(
+                envelope['From'], return_default=True)
+        except NoMatchingAccount:
+            ui.notify('no accounts set.', priority='error')
+            return
 
         if account.draft_box is None:
-            ui.notify('abort: account <%s> has no draft_box set.' % saddr,
-                      priority='error')
+            msg = 'abort: Account for {} has no draft_box'
+            ui.notify(msg.format(account.address), priority='error')
             return
 
         mail = envelope.construct_mail()
         # store mail locally
         # add Date header
-        mail['Date'] = email.Utils.formatdate(localtime=True)
+        mail['Date'] = email.utils.formatdate(localtime=True)
         path = account.store_draft_mail(email_as_string(mail))
 
         msg = 'draft saved successfully'
@@ -141,12 +141,12 @@ class SaveCommand(Command):
             ui.notify(msg + ' to %s' % path)
             logging.debug('adding new mail to index')
             try:
-                ui.dbman.add_message(path, account.draft_tags)
+                ui.dbman.add_message(path, account.draft_tags + envelope.tags)
                 ui.apply_command(globals.FlushCommand())
                 ui.apply_command(commands.globals.BufferCloseCommand())
             except DatabaseError as e:
-                logging.error(e.message)
-                ui.notify('could not index message:\n%s' % e.message,
+                logging.error(e)
+                ui.notify('could not index message:\n%s' % e,
                           priority='error',
                           block=True)
         else:
@@ -193,20 +193,30 @@ class SendCommand(Command):
             # don't do anything if another SendCommand is in the middle of
             # sending the message and we were triggered accidentally
             if self.envelope.sending:
-                msg = 'sending this message already!'
-                logging.debug(msg)
+                logging.debug('sending this message already!')
                 return
+
+            # Before attempting to construct mail, ensure that we're not trying
+            # to encrypt a message with a BCC, since any BCC recipients will
+            # receive a message that they cannot read!
+            if self.envelope.headers.get('Bcc') and self.envelope.encrypt:
+                warning = textwrap.dedent("""\
+                    Any BCC recipients will not be able to decrypt this
+                    message. Do you want to send anyway?""").replace('\n', ' ')
+                if (yield ui.choice(warning, cancel='no',
+                                    msg_position='left')) == 'no':
+                    return
 
             clearme = ui.notify(u'constructing mail (GPG, attachments)\u2026',
                                 timeout=-1)
 
             try:
                 self.mail = self.envelope.construct_mail()
-                self.mail['Date'] = email.Utils.formatdate(localtime=True)
+                self.mail['Date'] = email.utils.formatdate(localtime=True)
                 self.mail = email_as_string(self.mail)
-            except GPGProblem, e:
+            except GPGProblem as e:
                 ui.clear_notify([clearme])
-                ui.notify(e.message, priority='error')
+                ui.notify(str(e), priority='error')
                 return
 
             ui.clear_notify([clearme])
@@ -215,22 +225,18 @@ class SendCommand(Command):
         msg = self.mail
         if not isinstance(msg, email.message.Message):
             msg = email.message_from_string(self.mail)
-        sname, saddr = email.Utils.parseaddr(msg.get('From', ''))
-        account = settings.get_account_by_address(saddr)
-        if account is None:
-            if not settings.get_accounts():
-                ui.notify('no accounts set', priority='error')
-                return
-            else:
-                account = settings.get_accounts()[0]
-
-        # make sure self.mail is a string
-        logging.debug(self.mail.__class__)
-        if isinstance(self.mail, email.message.Message):
-            self.mail = str(self.mail)
+        address = msg.get('From', '')
+        logging.debug("FROM: \"%s\"" % address)
+        try:
+            account = settings.get_account_by_address(address,
+                                                      return_default=True)
+        except NoMatchingAccount:
+            ui.notify('no accounts set', priority='error')
+            return
+        logging.debug("ACCOUNT: \"%s\"" % account.address)
 
         # define callback
-        def afterwards(returnvalue):
+        def afterwards(_):
             initial_tags = []
             if self.envelope is not None:
                 self.envelope.sending = False
@@ -242,6 +248,10 @@ class SendCommand(Command):
                 cmd = commands.globals.BufferCloseCommand(self.envelope_buffer)
                 ui.apply_command(cmd)
             ui.notify('mail sent successfully')
+            if self.envelope.replied:
+                self.envelope.replied.add_tags(account.replied_tags)
+            if self.envelope.passed:
+                self.envelope.passed.add_tags(account.passed_tags)
 
             # store mail locally
             # This can raise StoreMailError
@@ -280,9 +290,9 @@ class SendCommand(Command):
 
 
 @registerCommand(MODE, 'edit', arguments=[
-    (['--spawn'], {'action': BooleanAction, 'default': None,
+    (['--spawn'], {'action': cargparse.BooleanAction, 'default': None,
                    'help': 'spawn editor in new terminal'}),
-    (['--refocus'], {'action': BooleanAction, 'default': True,
+    (['--refocus'], {'action': cargparse.BooleanAction, 'default': True,
                      'help': 'refocus envelope after editing'})])
 class EditCommand(Command):
     """edit mail"""
@@ -309,12 +319,12 @@ class EditCommand(Command):
         # determine editable headers
         edit_headers = set(settings.get('edit_headers_whitelist'))
         if '*' in edit_headers:
-            edit_headers = set(self.envelope.headers.keys())
+            edit_headers = set(self.envelope.headers)
         blacklist = set(settings.get('edit_headers_blacklist'))
         if '*' in blacklist:
-            blacklist = set(self.envelope.headers.keys())
+            blacklist = set(self.envelope.headers)
         edit_headers = edit_headers - blacklist
-        logging.info('editable headers: %s' % edit_headers)
+        logging.info('editable headers: %s', edit_headers)
 
         def openEnvelopeFromTmpfile():
             # This parses the input from the tempfile.
@@ -324,10 +334,9 @@ class EditCommand(Command):
 
             # get input
             # tempfile will be removed on buffer cleanup
-            f = open(self.envelope.tmpfile.name)
             enc = settings.get('editor_writes_encoding')
-            template = string_decode(f.read(), enc)
-            f.close()
+            with open(self.envelope.tmpfile.name) as f:
+                template = string_decode(f.read(), enc)
 
             # call post-edit translate hook
             translate = settings.get_hook('post_edit_translate')
@@ -376,12 +385,11 @@ class EditCommand(Command):
         old_tmpfile = None
         if self.envelope.tmpfile:
             old_tmpfile = self.envelope.tmpfile
-        self.envelope.tmpfile = tempfile.NamedTemporaryFile(delete=False,
-                                                            prefix='alot.',
-                                                            suffix='.eml')
-        self.envelope.tmpfile.write(content.encode('utf-8'))
-        self.envelope.tmpfile.flush()
-        self.envelope.tmpfile.close()
+        with tempfile.NamedTemporaryFile(
+                delete=False, prefix='alot.', suffix='.eml') as tmpfile:
+            tmpfile.write(content.encode('utf-8'))
+            tmpfile.flush()
+            self.envelope.tmpfile = tmpfile
         if old_tmpfile:
             os.unlink(old_tmpfile.name)
         cmd = globals.EditCommand(self.envelope.tmpfile.name,
@@ -414,7 +422,7 @@ class SetCommand(Command):
         envelope = ui.current_buffer.envelope
         if self.reset:
             if self.key in envelope:
-                del(envelope[self.key])
+                del envelope[self.key]
         envelope.add(self.key, self.value)
         ui.current_buffer.rebuild()
 
@@ -432,7 +440,7 @@ class UnsetCommand(Command):
         Command.__init__(self, **kwargs)
 
     def apply(self, ui):
-        del(ui.current_buffer.envelope[self.key])
+        del ui.current_buffer.envelope[self.key]
         ui.current_buffer.rebuild()
 
 
@@ -445,13 +453,18 @@ class ToggleHeaderCommand(Command):
         ui.current_buffer.toggle_all_headers()
 
 
-@registerCommand(MODE, 'sign', forced={'action': 'sign'}, arguments=[
-    (['keyid'], {'nargs': argparse.REMAINDER, 'help': 'which key id to use'})],
+@registerCommand(
+    MODE, 'sign', forced={'action': 'sign'},
+    arguments=[
+        (['keyid'],
+         {'nargs': argparse.REMAINDER, 'help': 'which key id to use'})],
     help='mark mail to be signed before sending')
 @registerCommand(MODE, 'unsign', forced={'action': 'unsign'},
                  help='mark mail not to be signed before sending')
-@registerCommand(MODE, 'togglesign', forced={'action': 'toggle'}, arguments=[
-    (['keyid'], {'nargs': argparse.REMAINDER, 'help': 'which key id to use'})],
+@registerCommand(
+    MODE, 'togglesign', forced={'action': 'toggle'}, arguments=[
+        (['keyid'],
+         {'nargs': argparse.REMAINDER, 'help': 'which key id to use'})],
     help='toggle sign status')
 class SignCommand(Command):
     """toggle signing this email"""
@@ -470,7 +483,6 @@ class SignCommand(Command):
 
     def apply(self, ui):
         sign = None
-        key = None
         envelope = ui.current_buffer.envelope
         # sign status
         if self.action == 'sign':
@@ -481,17 +493,31 @@ class SignCommand(Command):
             sign = not envelope.sign
         envelope.sign = sign
 
-        # try to find key if hint given as parameter
         if sign:
-            if len(self.keyid) > 0:
+            if self.keyid:
+                # try to find key if hint given as parameter
                 keyid = str(' '.join(self.keyid))
                 try:
-                    key = crypto.get_key(keyid, validate=True, sign=True)
-                except GPGProblem, e:
+                    envelope.sign_key = crypto.get_key(keyid, validate=True,
+                                                       sign=True)
+                except GPGProblem as e:
                     envelope.sign = False
-                    ui.notify(e.message, priority='error')
+                    ui.notify(str(e), priority='error')
                     return
-                envelope.sign_key = key
+            else:
+                try:
+                    acc = settings.get_account_by_address(envelope['From'])
+                except NoMatchingAccount:
+                    envelope.sign = False
+                    ui.notify('Unable to find a matching account',
+                              priority='error')
+                    return
+                if not acc.gpg_key:
+                    envelope.sign = False
+                    msg = 'Account for {} has no gpg key'
+                    ui.notify(msg.format(acc.address), priority='error')
+                    return
+                envelope.sign_key = acc.gpg_key
         else:
             envelope.sign_key = None
 
@@ -499,33 +525,44 @@ class SignCommand(Command):
         ui.current_buffer.rebuild()
 
 
-@registerCommand(MODE, 'encrypt', forced={'action': 'encrypt'}, arguments=[
-    (['keyids'], {'nargs': argparse.REMAINDER,
-                  'help': 'keyid of the key to encrypt with'})],
+@registerCommand(
+    MODE, 'encrypt', forced={'action': 'encrypt'}, arguments=[
+        (['--trusted'], {'action': 'store_true',
+                         'help': 'only add trusted keys'}),
+        (['keyids'], {'nargs': argparse.REMAINDER,
+                      'help': 'keyid of the key to encrypt with'})],
     help='request encryption of message before sendout')
-@registerCommand(MODE, 'unencrypt', forced={'action': 'unencrypt'},
-                 help='remove request to encrypt message before sending')
-@registerCommand(MODE, 'toggleencrypt', forced={'action': 'toggleencrypt'},
-                 arguments=[
-                     (['keyids'], {'nargs': argparse.REMAINDER,
+@registerCommand(
+    MODE, 'unencrypt', forced={'action': 'unencrypt'},
+    help='remove request to encrypt message before sending')
+@registerCommand(
+    MODE, 'toggleencrypt', forced={'action': 'toggleencrypt'},
+    arguments=[
+        (['--trusted'], {'action': 'store_true',
+                         'help': 'only add trusted keys'}),
+        (['keyids'], {'nargs': argparse.REMAINDER,
                       'help': 'keyid of the key to encrypt with'})],
-                 help='toggle if message should be encrypted before sendout')
-@registerCommand(MODE, 'rmencrypt', forced={'action': 'rmencrypt'},
-                 arguments=[
-                     (['keyids'], {'nargs': argparse.REMAINDER,
+    help='toggle if message should be encrypted before sendout')
+@registerCommand(
+    MODE, 'rmencrypt', forced={'action': 'rmencrypt'},
+    arguments=[
+        (['keyids'], {'nargs': argparse.REMAINDER,
                       'help': 'keyid of the key to encrypt with'})],
-                 help='do not encrypt to given recipient key')
+    help='do not encrypt to given recipient key')
 class EncryptCommand(Command):
-    def __init__(self, action=None, keyids=None, **kwargs):
+    def __init__(self, action=None, keyids=None, trusted=False, **kwargs):
         """
         :param action: wether to encrypt/unencrypt/toggleencrypt
         :type action: str
         :param keyid: the id of the key to encrypt
         :type keyid: str
+        :param trusted: wether to filter keys and only use trusted ones
+        :type trusted: bool
         """
 
         self.encrypt_keys = keyids
         self.action = action
+        self.trusted = trusted
         Command.__init__(self, **kwargs)
 
     @inlineCallbacks
@@ -535,9 +572,9 @@ class EncryptCommand(Command):
             try:
                 for keyid in self.encrypt_keys:
                     tmp_key = crypto.get_key(keyid)
-                    del envelope.encrypt_keys[crypto.hash_key(tmp_key)]
+                    del envelope.encrypt_keys[tmp_key.fpr]
             except GPGProblem as e:
-                ui.notify(e.message, priority='error')
+                ui.notify(str(e), priority='error')
             if not envelope.encrypt_keys:
                 envelope.encrypt = False
             ui.current_buffer.rebuild()
@@ -548,22 +585,74 @@ class EncryptCommand(Command):
             encrypt = False
         elif self.action == 'toggleencrypt':
             encrypt = not envelope.encrypt
-        envelope.encrypt = encrypt
         if encrypt:
-            if not self.encrypt_keys:
-                for recipient in envelope.headers['To'][0].split(','):
-                    if not recipient:
-                        continue
-                    match = re.search("<(.*@.*)>", recipient)
-                    if match:
-                        recipient = match.group(0)
-                    self.encrypt_keys.append(recipient)
-
-            logging.debug("encryption keys: " + str(self.encrypt_keys))
-            keys = yield get_keys(ui, self.encrypt_keys)
-            if keys:
-                envelope.encrypt_keys.update(keys)
+            if self.encrypt_keys:
+                for keyid in self.encrypt_keys:
+                    tmp_key = crypto.get_key(keyid)
+                    envelope.encrypt_keys[tmp_key.fpr] = tmp_key
             else:
-                envelope.encrypt = False
+                yield utils.set_encrypt(ui, envelope, signed_only=self.trusted)
+        envelope.encrypt = encrypt
+        if not envelope.encrypt:
+            # This is an extra conditional as it can even happen if encrypt is
+            # True.
+            envelope.encrypt_keys = {}
+        # reload buffer
+        ui.current_buffer.rebuild()
+
+
+@registerCommand(
+    MODE, 'tag', forced={'action': 'add'},
+    arguments=[(['tags'], {'help': 'comma separated list of tags'})],
+    help='add tags to message',
+)
+@registerCommand(
+    MODE, 'retag', forced={'action': 'set'},
+    arguments=[(['tags'], {'help': 'comma separated list of tags'})],
+    help='set message tags.',
+)
+@registerCommand(
+    MODE, 'untag', forced={'action': 'remove'},
+    arguments=[(['tags'], {'help': 'comma separated list of tags'})],
+    help='remove tags from message',
+)
+@registerCommand(
+    MODE, 'toggletags', forced={'action': 'toggle'},
+    arguments=[(['tags'], {'help': 'comma separated list of tags'})],
+    help='flip presence of tags on message',
+)
+class TagCommand(Command):
+
+    """manipulate message tags"""
+    repeatable = True
+
+    def __init__(self, tags=u'', action='add', **kwargs):
+        """
+        :param tags: comma separated list of tagstrings to set
+        :type tags: unicode
+        :param action: adds tags if 'add', removes them if 'remove', adds tags
+                       and removes all other if 'set' or toggle individually if
+                       'toggle'
+        :type action: str
+        """
+        assert isinstance(tags, unicode), 'tags should be a unicode string'
+        self.tagsstring = tags
+        self.action = action
+        Command.__init__(self, **kwargs)
+
+    def apply(self, ui):
+        ebuffer = ui.current_buffer
+        envelope = ebuffer.envelope
+        tags = {t for t in self.tagsstring.split(',') if t}
+        old = set(envelope.tags)
+        if self.action == 'add':
+            new = old.union(tags)
+        elif self.action == 'remove':
+            new = old.difference(tags)
+        elif self.action == 'set':
+            new = tags
+        elif self.action == 'toggle':
+            new = old.symmetric_difference(tags)
+        envelope.tags = sorted(new)
         # reload buffer
         ui.current_buffer.rebuild()

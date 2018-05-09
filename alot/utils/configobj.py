@@ -1,16 +1,19 @@
 # Copyright (C) 2011-2012  Patrick Totzke <patricktotzke@gmail.com>
 # This file is released under the GNU GPL, version 3 or a later revision.
 # For further details see the COPYING file
+from __future__ import absolute_import
+
 import mailbox
 import re
-from urwid import AttrSpec, AttrSpecError
 from urlparse import urlparse
+
 from validate import VdtTypeError
 from validate import is_list
 from validate import ValidateError, VdtValueTooLongError, VdtValueError
+from urwid import AttrSpec, AttrSpecError
 
-from alot import crypto
-from alot.errors import GPGProblem
+from .. import crypto
+from ..errors import GPGProblem
 
 
 def attr_triple(value):
@@ -43,8 +46,8 @@ def attr_triple(value):
         mono = AttrSpec(acc['1fg'], acc['1bg'], 1)
         normal = AttrSpec(acc['16fg'], acc['16bg'], 16)
         high = AttrSpec(acc['256fg'], acc['256bg'], 256)
-    except AttrSpecError, e:
-        raise ValidateError(e.message)
+    except AttrSpecError as e:
+        raise ValidateError(str(e))
     return mono, normal, high
 
 
@@ -110,22 +113,17 @@ def mail_container(value):
 
 
 def force_list(value, min=None, max=None):
-    """
+    r"""
     Check that a value is a list, coercing strings into
     a list with one member.
 
     You can optionally specify the minimum and maximum number of members.
-    A minumum of greater than one will fail if the user only supplies a
+    A minimum of greater than one will fail if the user only supplies a
     string.
 
     The difference to :func:`validate.force_list` is that this test
     will return an empty list instead of `['']` if the config value
     matches `r'\s*,?\s*'`.
-
-    >>> vtor.check('force_list', 'hello')
-    ['hello']
-    >>> vtor.check('force_list', '')
-    []
     """
     if not isinstance(value, (list, tuple)):
         value = [value]
@@ -138,9 +136,9 @@ def force_list(value, min=None, max=None):
 def gpg_key(value):
     """
     test if value points to a known gpg key
-    and return that key as :class:`pyme.pygpgme._gpgme_key`.
+    and return that key as a gpg key object.
     """
     try:
         return crypto.get_key(value)
-    except GPGProblem, e:
-        raise ValidateError(e.message)
+    except GPGProblem as e:
+        raise ValidateError(str(e))

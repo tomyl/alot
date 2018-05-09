@@ -1,30 +1,32 @@
 # Copyright (C) 2011-2012  Patrick Totzke <patricktotzke@gmail.com>
 # This file is released under the GNU GPL, version 3 or a later revision.
 # For further details see the COPYING file
+from __future__ import absolute_import
+
 import imp
+import itertools
+import logging
+import mailcap
 import os
 import re
-import mailcap
-import logging
+import email
 from configobj import ConfigObj, Section
 
-from alot.account import SendmailAccount
-from alot.addressbook.abook import AbookAddressBook
-from alot.addressbook.external import ExternalAddressbook
-from alot.helper import pretty_datetime, string_decode
+from ..account import SendmailAccount
+from ..addressbook.abook import AbookAddressBook
+from ..addressbook.external import ExternalAddressbook
+from ..helper import pretty_datetime, string_decode, get_xdg_env
+from ..utils import configobj as checks
 
-from errors import ConfigError
-from utils import read_config
-from utils import resolve_att
-from checks import force_list
-from checks import mail_container
-from checks import gpg_key
-from checks import attr_triple
-from checks import align_mode
-from theme import Theme
+from .errors import ConfigError, NoMatchingAccount
+from .utils import read_config
+from .utils import resolve_att
+from .theme import Theme
 
 
 DEFAULTSPATH = os.path.join(os.path.dirname(__file__), '..', 'defaults')
+DATA_DIRS = get_xdg_env('XDG_DATA_DIRS',
+                        '/usr/local/share:/usr/share').split(':')
 
 
 class SettingsManager(object):
@@ -36,68 +38,97 @@ class SettingsManager(object):
         :param notmuch_rc: path to notmuch's config file
         :type notmuch_rc: str
         """
+        assert alot_rc is None or (isinstance(alot_rc, basestring) and
+                                   os.path.exists(alot_rc))
+        assert notmuch_rc is None or (isinstance(notmuch_rc, basestring) and
+                                      os.path.exists(notmuch_rc))
         self.hooks = None
         self._mailcaps = mailcap.getcaps()
-        self._config = ConfigObj()
         self._notmuchconfig = None
         self._theme = None
         self._accounts = None
         self._accountmap = None
-        bindings_path = os.path.join(DEFAULTSPATH, 'default.bindings')
-        self._bindings = ConfigObj(bindings_path)
-        if alot_rc is not None:
-            self.read_config(alot_rc)
-        if notmuch_rc is not None:
-            self.read_notmuch_config(notmuch_rc)
+        self.alot_rc_path = alot_rc
+        self.notmuch_rc_path = notmuch_rc
+        self._notmuchconfig = None
+        self._config = ConfigObj()
+        self._bindings = None
+        self.reload()
 
-    def read_notmuch_config(self, path):
+    def reload(self):
+        """Reload All configurations.
+
+        This first resets all configs to default (in case an overwritten
+        binding is removed from the user config), then reloads the notmuch
+        config, and finally reads the alot config.
+
+        Implementation Detail: this is the same code called by the constructor
+        to set bindings at alot startup.
+        """
+        self._bindings = ConfigObj(os.path.join(DEFAULTSPATH,
+                                                'default.bindings'))
+        self.read_notmuch_config()
+        self.read_config()
+
+    def read_notmuch_config(self):
         """parse notmuch's config file from path"""
         spec = os.path.join(DEFAULTSPATH, 'notmuch.rc.spec')
-        self._notmuchconfig = read_config(path, spec)
+        self._notmuchconfig = read_config(self.notmuch_rc_path, spec)
 
-    def read_config(self, path):
+    def read_config(self):
         """parse alot's config file from path"""
         spec = os.path.join(DEFAULTSPATH, 'alot.rc.spec')
-        newconfig = read_config(path, spec,
-                                checks={'mail_container': mail_container,
-                                        'force_list': force_list,
-                                        'align': align_mode,
-                                        'attrtriple': attr_triple,
-                                        'gpg_key_hint': gpg_key})
+        newconfig = read_config(
+            self.alot_rc_path, spec, report_extra=True, checks={
+                'mail_container': checks.mail_container,
+                'force_list': checks.force_list,
+                'align': checks.align_mode,
+                'attrtriple': checks.attr_triple,
+                'gpg_key_hint': checks.gpg_key})
         self._config.merge(newconfig)
+        self._config.walk(self._expand_config_values)
 
         hooks_path = os.path.expanduser(self._config.get('hooksfile'))
         try:
             self.hooks = imp.load_source('hooks', hooks_path)
         except:
-            logging.debug('unable to load hooks file:%s' % hooks_path)
+            logging.debug('unable to load hooks file:%s', hooks_path)
         if 'bindings' in newconfig:
             newbindings = newconfig['bindings']
             if isinstance(newbindings, Section):
                 self._bindings.merge(newbindings)
+
+        tempdir = self._config.get('template_dir')
+        logging.debug('template directory: `%s`' % tempdir)
+
         # themes
         themestring = newconfig['theme']
         themes_dir = self._config.get('themes_dir')
-        if themes_dir:
-            themes_dir = os.path.expanduser(themes_dir)
-        else:
-            configdir = os.environ.get('XDG_CONFIG_HOME',
-                                       os.path.expanduser('~/.config'))
-            themes_dir = os.path.join(configdir, 'alot', 'themes')
-        logging.debug(themes_dir)
+        logging.debug('themes directory: `%s`' % themes_dir)
 
         # if config contains theme string use that
+        data_dirs = [os.path.join(d, 'alot/themes') for d in DATA_DIRS]
         if themestring:
-            if not os.path.isdir(themes_dir):
-                err_msg = 'cannot find theme %s: themes_dir %s is missing'
-                raise ConfigError(err_msg % (themestring, themes_dir))
+            # This is a python for/else loop
+            # https://docs.python.org/3/reference/compound_stmts.html#for
+            #
+            # tl/dr; If the loop loads a theme it breaks. If it doesn't break,
+            # then it raises a ConfigError.
+            for dir_ in itertools.chain([themes_dir], data_dirs):
+                theme_path = os.path.join(dir_, themestring)
+                if not os.path.exists(os.path.expanduser(theme_path)):
+                    logging.warning('Theme `%s` does not exist.', theme_path)
+                else:
+                    try:
+                        self._theme = Theme(theme_path)
+                    except ConfigError as e:
+                        raise ConfigError('Theme file `%s` failed '
+                                          'validation:\n%s' % (theme_path, e))
+                    else:
+                        break
             else:
-                theme_path = os.path.join(themes_dir, themestring)
-                try:
-                    self._theme = Theme(theme_path)
-                except ConfigError as e:
-                    err_msg = 'Theme file %s failed validation:\n'
-                    raise ConfigError((err_msg % themestring) + str(e.message))
+                raise ConfigError('Could not find theme {}, see log for more '
+                                  'information'.format(themestring))
 
         # if still no theme is set, resort to default
         if self._theme is None:
@@ -107,7 +138,57 @@ class SettingsManager(object):
         self._accounts = self._parse_accounts(self._config)
         self._accountmap = self._account_table(self._accounts)
 
-    def _parse_accounts(self, config):
+    @staticmethod
+    def _expand_config_values(section, key):
+        """
+        Walker function for ConfigObj.walk
+
+        Applies expand_environment_and_home to all configuration values that
+        are strings (or strings that are elements of tuples/lists)
+
+        :param section: as passed by ConfigObj.walk
+        :param key: as passed by ConfigObj.walk
+        """
+
+        def expand_environment_and_home(value):
+            """
+            Expands environment variables and the home directory (~).
+
+            $FOO and ${FOO}-style environment variables are expanded, if they
+            exist. If they do not exist, they are left unchanged.
+            The exception are the following $XDG_* variables that are
+            expanded to fallback values, if they are empty or not set:
+            $XDG_CONFIG_HOME
+            $XDG_CACHE_HOME
+
+            :param value: configuration string
+            :type value: str
+            """
+            xdg_vars = {'XDG_CONFIG_HOME': '~/.config',
+                        'XDG_CACHE_HOME': '~/.cache'}
+
+            for xdg_name, fallback in xdg_vars.items():
+                if xdg_name in value:
+                    xdg_value = get_xdg_env(xdg_name, fallback)
+                    value = value.replace('$%s' % xdg_name, xdg_value)\
+                                 .replace('${%s}' % xdg_name, xdg_value)
+            return os.path.expanduser(os.path.expandvars(value))
+
+        value = section[key]
+
+        if isinstance(value, (str, unicode)):
+            section[key] = expand_environment_and_home(value)
+        elif isinstance(value, (list, tuple)):
+            new = list()
+            for item in value:
+                if isinstance(item, (str, unicode)):
+                    new.append(expand_environment_and_home(item))
+                else:
+                    new.append(item)
+            section[key] = new
+
+    @staticmethod
+    def _parse_accounts(config):
         """
         read accounts information from config
 
@@ -119,19 +200,18 @@ class SettingsManager(object):
         if 'accounts' in config:
             for acc in config['accounts'].sections:
                 accsec = config['accounts'][acc]
-                args = dict(config['accounts'][acc])
+                args = dict(config['accounts'][acc].items())
 
                 # create abook for this account
                 abook = accsec['abook']
-                logging.debug('abook defined: %s' % abook)
+                logging.debug('abook defined: %s', abook)
                 if abook['type'] == 'shellcommand':
                     cmd = abook['command']
                     regexp = abook['regexp']
                     if cmd is not None and regexp is not None:
                         ef = abook['shellcommand_external_filtering']
-                        args['abook'] = ExternalAddressbook(cmd,
-                                                            regexp,
-                                                            external_filtering=ef)
+                        args['abook'] = ExternalAddressbook(
+                            cmd, regexp, external_filtering=ef)
                     else:
                         msg = 'underspecified abook of type \'shellcommand\':'
                         msg += '\ncommand: %s\nregexp:%s' % (cmd, regexp)
@@ -141,15 +221,16 @@ class SettingsManager(object):
                     args['abook'] = AbookAddressBook(
                         contacts_path, ignorecase=abook['ignorecase'])
                 else:
-                    del(args['abook'])
+                    del args['abook']
 
                 cmd = args['sendmail_command']
-                del(args['sendmail_command'])
+                del args['sendmail_command']
                 newacc = SendmailAccount(cmd, **args)
                 accounts.append(newacc)
         return accounts
 
-    def _account_table(self, accounts):
+    @staticmethod
+    def _account_table(accounts):
         """
         creates a lookup table (emailaddress -> account) for a given list of
         accounts
@@ -189,7 +270,7 @@ class SettingsManager(object):
         """
         setter for global config values
 
-        :param key: config option identifise
+        :param key: config option identifies
         :type key: str
         :param value: option to set
         :type value: depends on the specfile :file:`alot.rc.spec`
@@ -284,7 +365,7 @@ class SettingsManager(object):
         fallback_focus = resolve_att(onebelow_focus, default_focus)
 
         for sec in cfg['tags'].sections:
-            if re.match('^' + sec + '$', tag):
+            if re.match('^{}$'.format(re.escape(sec)), tag):
                 normal = resolve_att(colourpick(cfg['tags'][sec]['normal']),
                                      fallback_normal)
                 focus = resolve_att(colourpick(cfg['tags'][sec]['focus']),
@@ -308,8 +389,7 @@ class SettingsManager(object):
     def get_hook(self, key):
         """return hook (`callable`) identified by `key`"""
         if self.hooks:
-            if key in self.hooks.__dict__:
-                return self.hooks.__dict__[key]
+            return getattr(self.hooks, key, None)
         return None
 
     def get_mapped_input_keysequences(self, mode='global', prefix=u''):
@@ -317,8 +397,8 @@ class SettingsManager(object):
         globalmaps, modemaps = self.get_keybindings(mode)
         candidates = globalmaps.keys() + modemaps.keys()
         if prefix is not None:
-            prefixs = prefix + ' '
-            cand = filter(lambda x: x.startswith(prefixs), candidates)
+            prefixes = prefix + ' '
+            cand = [c for c in candidates if c.startswith(prefixes)]
             if prefix in candidates:
                 candidates = cand + [prefix]
             else:
@@ -353,8 +433,9 @@ class SettingsManager(object):
                 if value and value != '':
                     globalmaps[key] = value
         # get rid of empty commands left in mode bindings
-        for key in [k for k, v in modemaps.items() if not v or v == '']:
-            del modemaps[key]
+        for k, v in modemaps.items():
+            if not v:
+                del modemaps[k]
 
         return globalmaps, modemaps
 
@@ -394,19 +475,28 @@ class SettingsManager(object):
         """
         return self._accounts
 
-    def get_account_by_address(self, address):
-        """
-        returns :class:`Account` for a given email address (str)
+    def get_account_by_address(self, address, return_default=False):
+        """returns :class:`Account` for a given email address (str)
 
-        :param address: address to look up
-        :type address: string
-        :rtype:  :class:`Account` or None
+        :param str address: address to look up. A realname part will be ignored.
+        :param bool return_default: If True and no address can be found, then
+            the default account wil be returned
+        :rtype: :class:`Account`
+        :raises ~alot.settings.errors.NoMatchingAccount: If no account can be
+            found. This includes if return_default is True and there are no
+            accounts defined.
         """
-
+        _, address = email.utils.parseaddr(address)
         for myad in self.get_addresses():
-            if myad in address:
+            if myad == address:
                 return self._accountmap[myad]
-        return None
+        if return_default:
+            try:
+                return self.get_accounts()[0]
+            except IndexError:
+                # Fall through
+                pass
+        raise NoMatchingAccount
 
     def get_main_addresses(self):
         """returns addresses of known accounts without its aliases"""
@@ -416,8 +506,9 @@ class SettingsManager(object):
         """returns addresses of known accounts including all their aliases"""
         return self._accountmap.keys()
 
-    def get_addressbooks(self, order=[], append_remaining=True):
+    def get_addressbooks(self, order=None, append_remaining=True):
         """returns list of all defined :class:`AddressBook` objects"""
+        order = order or []
         abooks = []
         for a in order:
             if a:

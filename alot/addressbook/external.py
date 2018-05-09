@@ -1,6 +1,8 @@
 # Copyright (C) 2011-2015  Patrick Totzke <patricktotzke@gmail.com>
 # This file is released under the GNU GPL, version 3 or a later revision.
 # For further details see the COPYING file
+from __future__ import absolute_import
+
 import re
 
 from ..helper import call_cmd
@@ -42,7 +44,7 @@ class ExternalAddressbook(AddressBook):
     def get_contacts(self):
         return self._call_and_parse(self.commandline)
 
-    def lookup(self, prefix):
+    def lookup(self, prefix):  # pragma: no cover
         if self.external_filtering:
             return self._call_and_parse(self.commandline + " " + prefix)
         else:
@@ -66,7 +68,7 @@ class ExternalAddressbook(AddressBook):
             m = re.match(self.regex, l, self.reflags)
             if m:
                 info = m.groupdict()
-                if 'email' and 'name' in info:
+                if 'email' in info and 'name' in info:
                     email = info['email'].strip()
                     name = info['name']
                     res.append((name, email))

@@ -4,13 +4,14 @@
 """
 Widgets specific to search mode
 """
+from __future__ import absolute_import
+
 import urwid
 
-from alot.settings import settings
-from alot.helper import shorten_author_string
-from alot.helper import tag_cmp
-from alot.widgets.utils import AttrFlipWidget
-from alot.widgets.globals import TagWidget
+from ..settings.const import settings
+from ..helper import shorten_author_string
+from .utils import AttrFlipWidget
+from .globals import TagWidget
 
 
 class ThreadlineWidget(urwid.AttrMap):
@@ -54,7 +55,7 @@ class ThreadlineWidget(urwid.AttrMap):
             datestring = ''
             if self.thread:
                 newest = self.thread.get_newest_date()
-                if newest != None:
+                if newest is not None:
                     datestring = settings.represent_datetime(newest)
             datestring = pad(datestring)
             width = len(datestring)
@@ -114,10 +115,9 @@ class ThreadlineWidget(urwid.AttrMap):
             if self.thread:
                 fallback_normal = struct[name]['normal']
                 fallback_focus = struct[name]['focus']
-                tag_widgets = [TagWidget(t, fallback_normal, fallback_focus)
-                               for t in self.thread.get_tags()]
-                tag_widgets.sort(tag_cmp,
-                                 lambda tag_widget: tag_widget.translated)
+                tag_widgets = sorted(
+                    TagWidget(t, fallback_normal, fallback_focus)
+                    for t in self.thread.get_tags())
             else:
                 tag_widgets = []
             cols = []
@@ -177,7 +177,8 @@ class ThreadlineWidget(urwid.AttrMap):
     def get_thread(self):
         return self.thread
 
-    def _get_theme(self, component, focus=False):
+    @staticmethod
+    def _get_theme(component, focus=False):
         path = ['search', 'threadline', component]
         if focus:
             path.append('focus')

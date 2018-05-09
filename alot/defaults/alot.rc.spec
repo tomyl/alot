@@ -13,6 +13,10 @@ attachment_prefix = string(default='~')
 # timeout in (floating point) seconds until partial input is cleared
 input_timeout = float(default=1.0)
 
+# A list of tags that will be excluded from search results by default. Using an excluded tag in a query will override that exclusion.
+# .. note:: this config setting is equivalent to, but independent of, the 'search.exclude_tags' in the notmuch config.
+exclude_tags = force_list(default=list())
+
 # confirm exit
 bug_on_exit = boolean(default=False)
 
@@ -29,11 +33,19 @@ tabwidth = integer(default=8)
 # It will be used if you give `compose --template` a filename without a path prefix.
 template_dir = string(default='$XDG_CONFIG_HOME/alot/templates')
 
-# directory containing theme files
-themes_dir = string(default=None)
+# directory containing theme files.
+themes_dir = string(default='$XDG_CONFIG_HOME/alot/themes')
 
 # name of the theme to use
 theme = string(default=None)
+
+# enable mouse support - mouse tracking will be handled by urwid
+#
+# .. note:: If this is set to True mouse events are passed from the terminal
+#           to urwid/alot.  This means that normal text selection in alot will
+#           not be possible.  Most terminal emulators will still allow you to
+#           select text when shift is pressed.
+handle_mouse = boolean(default=False)
 
 # headers that get displayed by default
 displayed_headers = force_list(default=list(From,To,Cc,Bcc,Subject))
@@ -62,6 +74,13 @@ thread_authors_order_by = option('first_message', 'latest_message', default='fir
 #   the thread subject
 thread_subject = option('oldest', 'notmuch', default='notmuch')
 
+# When constructing the unique list of thread authors, order by date of
+# author's first or latest message in thread
+thread_authors_order_by = option('first_message', 'latest_message', default='first_message')
+
+# number of characters used to indent replies relative to original messages in thread mode 
+thread_indent_replies = integer(default=2)
+
 # set terminal command used for spawning shell commands
 terminal_cmd = string(default='x-terminal-emulator -e')
 
@@ -72,7 +91,7 @@ editor_cmd = string(default=None)
 # file encoding used by your editor
 editor_writes_encoding = string(default='UTF-8')
 
-# use terminal_command to spawn a new terminal for the editor?
+# use :ref:`terminal_cmd <terminal-cmd>` to spawn a new terminal for the editor?
 # equivalent to always providing the `--spawn=yes` parameter to compose/edit commands
 editor_spawn = boolean(default=False)
 
@@ -233,7 +252,28 @@ prefer_plaintext = boolean(default=False)
 # messages in that thread.
 msg_summary_hides_threadwide_tags = boolean(default=True)
 
-# Key bindings 
+# The list of headers to match to determine sending account for a reply.
+# Headers are searched in the order in which they are specified here, and the first header
+# containing a match is used. If multiple accounts match in that header, the one defined
+# first in the account block is used.
+reply_account_header_priority = force_list(default=list(From,To,Cc,Envelope-To,X-Envelope-To,Delivered-To))
+
+# The number of command line history entries to save
+#
+# .. note:: You can set this to -1 to save *all* entries to disk but the
+#           history file might get *very* long.
+history_size = integer(default=50)
+
+# The number of seconds to wait between calls to the loop_hook
+periodic_hook_frequency = integer(default=300)
+
+# Split message body linewise and allows to (move) the focus to each individual
+# line. Setting this to False will result in one potentially big text widget
+# for the whole message body.
+thread_focus_linewise = boolean(default=True)
+
+
+# Key bindings
 [bindings]
     __many__ = string(default=None)
     [[___many___]]
@@ -286,7 +326,16 @@ msg_summary_hides_threadwide_tags = boolean(default=True)
         draft_box = mail_container(default=None)
 
         # list of tags to automatically add to outgoing messages
-        sent_tags = force_list(default=list('sent'))
+        sent_tags = force_list(default='sent')
+
+        # list of tags to automatically add to draft messages
+        draft_tags = force_list(default='draft')
+
+        # list of tags to automatically add to replied messages
+        replied_tags = force_list(default='replied')
+
+        # list of tags to automatically add to passed messages
+        passed_tags = force_list(default='passed')
 
         # path to signature file that gets attached to all outgoing mails from this account, optionally
         # renamed to :ref:`signature_filename <signature-filename>`.
@@ -303,12 +352,43 @@ msg_summary_hides_threadwide_tags = boolean(default=True)
         # Outgoing messages will be GPG signed by default if this is set to True.
         sign_by_default = boolean(default=False)
 
-        # Outgoing messages will be GPG encrypted by default if this is set to True.
-        encrypt_by_default = boolean(default=False)
+        # Alot will try to GPG encrypt outgoing messages by default when this
+        # is set to `all` or `trusted`.  If set to `all` the message will be
+        # encrypted for all recipients for who a key is available in the key
+        # ring.  If set to `trusted` it will be encrypted to all
+        # recipients if a trusted key is available for all recipients (one
+        # where the user id for the key is signed with a trusted signature).
+        #
+        # .. note:: If the message will not be encrypted by default you can
+        #           still use the :ref:`toggleencrypt
+        #           <cmd.envelope.toggleencrypt>`, :ref:`encrypt
+        #           <cmd.envelope.encrypt>` and :ref:`unencrypt
+        #           <cmd.envelope.unencrypt>` commands to encrypt it.
+        # .. deprecated:: 0.4
+        #           The values `True` and `False` are interpreted as `all` and
+        #           `none` respectively. `0`, `1`, `true`, `True`, `false`,
+        #           `False`, `yes`, `Yes`, `no`, `No`, will be removed before
+        #           1.0, please move to `all`, `none`, or `trusted`.
+        encrypt_by_default = option('all', 'none', 'trusted', 'True', 'False', 'true', 'false', 'Yes', 'No', 'yes', 'no', '1', '0', default='none')
 
-        # The GPG key ID you want to use with this account. If unset, alot will
-        # use your default key.
+        # If this is true when encrypting a message it will also be encrypted
+        # with the key defined for this account.
+        #
+        # .. warning::
+        #   
+        #    Before 0.6 this was controlled via gpg.conf.
+        encrypt_to_self = boolean(default=True)
+
+        # The GPG key ID you want to use with this account.
         gpg_key = gpg_key_hint(default=None)
+
+        # Whether the server treats the address as case-senstive or
+        # case-insensitve (True for the former, False for the latter)
+        #
+        # .. note:: The vast majority (if not all) SMTP servers in modern use
+        #           treat usernames as case insenstive, you should only set
+        #           this if you know that you need it.
+        case_sensitive_username = boolean(default=False)
 
         # address book for this account
         [[[abook]]]

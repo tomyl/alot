@@ -1,29 +1,35 @@
 # -*- coding: utf-8 -*-
 # Copyright (C) 2011-2012  Patrick Totzke <patricktotzke@gmail.com>
+# Copyright © 2017 Dylan Baker
 # This file is released under the GNU GPL, version 3 or a later revision.
 # For further details see the COPYING file
+from __future__ import absolute_import
+from __future__ import division
+
 from datetime import timedelta
 from datetime import datetime
 from collections import deque
-import subprocess
-import shlex
-import email
+from io import BytesIO
+from cStringIO import StringIO
+import logging
 import mimetypes
 import os
 import re
+import shlex
+import subprocess
+import email
 from email.generator import Generator
 from email.mime.audio import MIMEAudio
 from email.mime.base import MIMEBase
 from email.mime.image import MIMEImage
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
 import urwid
 import magic
 from twisted.internet import reactor
 from twisted.internet.protocol import ProcessProtocol
 from twisted.internet.defer import Deferred
-from cStringIO import StringIO
-import logging
 
 
 def split_commandline(s, comments=False, posix=True):
@@ -54,24 +60,6 @@ def split_commandstring(cmdstring):
     if isinstance(cmdstring, unicode):
         cmdstring = cmdstring.encode('utf-8', errors='ignore')
     return shlex.split(cmdstring)
-
-
-def safely_get(clb, E, on_error=''):
-    """
-    returns result of :func:`clb` and falls back to `on_error`
-    in case exception `E` is raised.
-
-    :param clb: function to evaluate
-    :type clb: callable
-    :param E: exception to catch
-    :type E: Exception
-    :param on_error: default string returned when exception is caught
-    :type on_error: str
-    """
-    try:
-        return clb()
-    except E:
-        return on_error
 
 
 def string_sanitize(string, tab_width=8):
@@ -117,6 +105,14 @@ def string_sanitize(string, tab_width=8):
 def string_decode(string, enc='ascii'):
     """
     safely decodes string to unicode bytestring, respecting `enc` as a hint.
+
+    :param string: the string to decode
+    :type string: str or unicode
+    :param enc: a hint what encoding is used in string ('ascii', 'utf-8', ...)
+    :type enc: str
+    :returns: the unicode decoded input string
+    :rtype: unicode
+
     """
 
     if enc is None:
@@ -132,8 +128,8 @@ def string_decode(string, enc='ascii'):
 
 def shorten(string, maxlen):
     """shortens string if longer than maxlen, appending ellipsis"""
-    if maxlen > 1 and len(string) > maxlen:
-        string = string[:maxlen - 1] + u'\u2026'
+    if 1 < maxlen < len(string):
+        string = string[:maxlen - 1] + u'…'
     return string[:maxlen]
 
 
@@ -157,20 +153,6 @@ def shorten_author_string(authors_string, maxlength):
 
       - If it is finally necessary to hide any author, an ellipsis
         between first and next authors is added.
-
-    >>> authors = u'King Kong, Mucho Muchacho, Jaime Huerta, Flash Gordon'
-    >>> print shorten_author_string(authors, 60)
-    King Kong, Mucho Muchacho, Jaime Huerta, Flash Gordon
-    >>> print shorten_author_string(authors, 40)
-    King, Mucho, Jaime, Flash
-    >>> print shorten_author_string(authors, 20)
-    King, …, Jai…, Flash
-    >>> print shorten_author_string(authors, 10)
-    King, …
-    >>> print shorten_author_string(authors, 2)
-    K…
-    >>> print shorten_author_string(authors, 1)
-    K
     """
 
     # I will create a list of authors by parsing author_string. I use
@@ -252,7 +234,7 @@ def pretty_datetime(d):
     >>> pretty_datetime(now - timedelta(days=356))
     u'Apr 2011'
     """
-    ampm = d.strftime('%P')
+    ampm = d.strftime('%p').lower()
     if len(ampm):
         hourfmt = '%I' + ampm
         hourminfmt = '%I:%M' + ampm
@@ -267,9 +249,9 @@ def pretty_datetime(d):
         if delta.seconds < 60:
             string = 'just now'
         elif delta.seconds < 3600:
-            string = '%dmin ago' % (delta.seconds / 60)
+            string = '%dmin ago' % (delta.seconds // 60)
         elif delta.seconds < 6 * 3600:
-            string = '%dh ago' % (delta.seconds / 3600)
+            string = '%dh ago' % (delta.seconds // 3600)
         else:
             string = d.strftime(hourminfmt)
     elif d.date() == today - timedelta(1):
@@ -300,24 +282,19 @@ def call_cmd(cmdlist, stdin=None):
     :return: triple of stdout, stderr, return value of the shell command
     :rtype: str, str, int
     """
-
-    out, err, ret = '', '', 0
     try:
-        if stdin:
-            proc = subprocess.Popen(cmdlist, stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE)
-            out, err = proc.communicate(stdin)
-            ret = proc.poll()
-        else:
-            try:
-                out = subprocess.check_output(cmdlist)
-            except subprocess.CalledProcessError as e:
-                err = e.output
-                ret = e.returncode
+        proc = subprocess.Popen(
+            cmdlist,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE if stdin is not None else None)
     except OSError as e:
+        out = b''
         err = e.strerror
         ret = e.errno
+    else:
+        out, err = proc.communicate(stdin)
+        ret = proc.returncode
 
     out = string_decode(out, urwid.util.detected_encoding)
     err = string_decode(err, urwid.util.detected_encoding)
@@ -339,8 +316,8 @@ def call_cmd_async(cmdlist, stdin=None, env=None):
     class _EverythingGetter(ProcessProtocol):
         def __init__(self, deferred):
             self.deferred = deferred
-            self.outBuf = StringIO()
-            self.errBuf = StringIO()
+            self.outBuf = BytesIO()
+            self.errBuf = BytesIO()
             self.outReceived = self.outBuf.write
             self.errReceived = self.errBuf.write
 
@@ -356,11 +333,11 @@ def call_cmd_async(cmdlist, stdin=None, env=None):
                 self.deferred.errback(terminated_obj)
 
     d = Deferred()
-    environment = os.environ
+    environment = os.environ.copy()
     if env is not None:
         environment.update(env)
-    logging.debug('ENV = %s' % environment)
-    logging.debug('CMD = %s' % cmdlist)
+    logging.debug('ENV = %s', environment)
+    logging.debug('CMD = %s', cmdlist)
     proc = reactor.spawnProcess(_EverythingGetter(d), executable=cmdlist[0],
                                 env=environment,
                                 args=cmdlist)
@@ -397,7 +374,8 @@ def guess_mimetype(blob):
         m.load()
         magictype = m.buffer(blob)
     elif hasattr(magic, 'from_buffer'):
-        magictype = magic.from_buffer(blob, mime=True)
+        # cf. issue #841
+        magictype = magic.from_buffer(blob, mime=True) or magictype
     else:
         raise Exception('Unknown magic API')
 
@@ -458,12 +436,27 @@ def libmagic_version_at_least(version):
         # if it's not present, we can't guess right, so let's assume False
         return False
 
-    return (magic_wrapper.magic_version >= version)
+    return magic_wrapper.magic_version >= version
 
 
 # TODO: make this work on blobs, not paths
 def mimewrap(path, filename=None, ctype=None):
-    content = open(path, 'rb').read()
+    """Take the contents of the given path and wrap them into an email MIME
+    part according to the content type.  The content type is auto detected from
+    the actual file contents and the file name if it is not given.
+
+    :param path: the path to the file contents
+    :type path: str
+    :param filename: the file name to use in the generated MIME part
+    :type filename: str or None
+    :param ctype: the content type of the file contents in path
+    :type ctype: str or None
+    :returns: the message MIME part storing the data from path
+    :rtype: subclasses of email.mime.base.MIMEBase
+    """
+
+    with open(path, 'rb') as f:
+        content = f.read()
     if not ctype:
         ctype = guess_mimetype(content)
         # libmagic < 5.12 incorrectly detects excel/powerpoint files as
@@ -472,7 +465,7 @@ def mimewrap(path, filename=None, ctype=None):
         # as distributions still ship libmagic 5.11.
         if (ctype == 'application/msword' and
                 not libmagic_version_at_least(513)):
-            mimetype, encoding = mimetypes.guess_type(path)
+            mimetype, _ = mimetypes.guess_type(path)
             if mimetype:
                 ctype = mimetype
 
@@ -499,44 +492,35 @@ def mimewrap(path, filename=None, ctype=None):
 
 
 def shell_quote(text):
-    r'''
-    >>> print(shell_quote("hello"))
-    'hello'
-    >>> print(shell_quote("hello'there"))
-    'hello'"'"'there'
-    '''
+    """Escape the given text for passing it to the shell for interpretation.
+    The resulting string will be parsed into one "word" (in the sense used in
+    the shell documentation, see sh(1)) by the shell.
+
+    :param text: the text to quote
+    :type text: str
+    :returns: the quoted text
+    :rtype: str
+    """
     return "'%s'" % text.replace("'", """'"'"'""")
 
 
-def tag_cmp(a, b):
-    r'''
-    Sorting tags using this function puts all tags of length 1 at the
-    beginning. This groups all tags mapped to unicode characters.
-    '''
-    if min(len(a), len(b)) == 1 and max(len(a), len(b)) > 1:
-        return cmp(len(a), len(b))
-    else:
-        return cmp(a.lower(), b.lower())
-
-
 def humanize_size(size):
-    r'''
-    >>> humanize_size(1)
-    '1'
-    >>> humanize_size(123)
-    '123'
-    >>> humanize_size(1234)
-    '1K'
-    >>> humanize_size(1234 * 1024)
-    '1.2M'
-    >>> humanize_size(1234 * 1024 * 1024)
-    '1234.0M'
-    '''
+    """Create a nice human readable representation of the given number
+    (understood as bytes) using the "KiB" and "MiB" suffixes to indicate
+    kibibytes and mebibytes. A kibibyte is defined as 1024 bytes (as opposed to
+    a kilobyte which is 1000 bytes) and a mibibyte is 1024**2 bytes (as opposed
+    to a megabyte which is 1000**2 bytes).
+
+    :param size: the number to convert
+    :type size: int
+    :returns: the human readable representation of size
+    :rtype: str
+    """
     for factor, format_string in ((1, '%i'),
-                                  (1024, '%iK'),
-                                  (1024 * 1024, '%.1fM')):
+                                  (1024, '%iKiB'),
+                                  (1024 * 1024, '%.1fMiB')):
         if size / factor < 1024:
-            return format_string % (float(size) / factor)
+            return format_string % (size / factor)
     return format_string % (size / factor)
 
 
@@ -602,8 +586,7 @@ def RFC3156_canonicalize(text):
     This function works as follows (in that order):
 
     1. Convert all line endings to \\\\r\\\\n (DOS line endings).
-    2. Ensure the text ends with a newline (\\\\r\\\\n).
-    3. Encode all occurences of "From " at the beginning of a line
+    2. Encode all occurrences of "From " at the beginning of a line
        to "From=20" in order to prevent other mail programs to replace
        this with "> From" (to avoid MBox conflicts) and thus invalidate
        the signature.
@@ -612,8 +595,6 @@ def RFC3156_canonicalize(text):
     :rtype: str
     """
     text = re.sub("\r?\n", "\r\n", text)
-    if not text.endswith("\r\n"):
-        text += "\r\n"
     text = re.sub("^From ", "From=20", text, flags=re.MULTILINE)
     return text
 
@@ -640,7 +621,13 @@ def email_as_string(mail):
         # clients can verify the signature when sending an email which contains
         # attachments.
         as_string = re.sub(r'--(\r\n)--' + boundary,
-                           '--\g<1>\g<1>--' + boundary,
+                           r'--\g<1>\g<1>--' + boundary,
                            as_string, flags=re.MULTILINE)
 
     return as_string
+
+
+def get_xdg_env(env_name, fallback):
+    """ Used for XDG_* env variables to return fallback if unset *or* empty """
+    env = os.environ.get(env_name)
+    return env if env else fallback
